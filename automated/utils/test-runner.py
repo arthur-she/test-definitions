@@ -374,7 +374,7 @@ class AutomatedTestRun(TestRun):
     def run(self):
         self.logger.info('Executing %s/run.sh' % self.test['test_path'])
         shell_cmd = '%s/run.sh 2>&1 | tee %s/stdout.log' % (self.test['test_path'], self.test['test_path'])
-        self.child = pexpect.spawn('/bin/sh', ['-c', shell_cmd])
+        self.child = pexpect.spawnu('/bin/sh', ['-c', shell_cmd])
         self.check_result()
 
     def check_result(self):
@@ -389,10 +389,7 @@ class AutomatedTestRun(TestRun):
                 break
             try:
                 self.child.expect('\r\n')
-                if sys.version_info[0] < 3:
-                    print(self.child.before)
-                else:
-                    print(self.child.before.decode('utf-8'))
+                print(self.child.before)
             except pexpect.TIMEOUT:
                 continue
             except pexpect.EOF:
@@ -431,7 +428,7 @@ class RemoteTestRun(AutomatedTestRun):
         shell_cmd = 'ssh %s %s "%s/run.sh 2>&1"' % (SSH_PARAMS, self.args.target, self.test['target_test_path'])
         self.logger.debug('shell_cmd: %s' % shell_cmd)
         output = open("%s/stdout.log" % self.test['test_path'], "w")
-        self.child = pexpect.spawn(shell_cmd)
+        self.child = pexpect.spawnu(shell_cmd)
         self.child.logfile = output
         self.check_result()
 
@@ -680,6 +677,9 @@ class ResultParser(object):
         self.qa_reports_group = args.qa_reports_group
         self.qa_reports_env = args.qa_reports_env
         self.qa_reports_build_version = args.qa_reports_build_version
+        self.qa_reports_disable_metadata = args.qa_reports_disable_metadata
+        self.qa_reports_metadata = args.qa_reports_metadata
+        self.qa_reports_metadata_file = args.qa_reports_metadata_file
 
         with open(os.path.join(self.test['test_path'], "testdef.yaml"), "r") as f:
             self.testdef = yaml.safe_load(f)
@@ -812,17 +812,38 @@ class ResultParser(object):
         with open("{}/stdout.log".format(self.test['test_path']), "r") as logfile:
             log = logfile.read()
 
-        submit_results(
-            group_project_slug="{}/{}".format(self.qa_reports_group, self.qa_reports_project),
-            build_version=self.qa_reports_build_version,
-            env_slug=self.qa_reports_env,
-            tests=tests,
-            metrics=metrics,
-            log=log,
-            metadata=self.testdef['metadata'],
-            attachments=None,
-        )
-        self.logger.info("Results pushed to QA Reports")
+        metadata = {}
+        if not self.qa_reports_disable_metadata:
+            if self.qa_reports_metadata:
+                metadata.update(self.qa_reports_metadata)
+            if self.qa_reports_metadata_file:
+                try:
+                    with open(self.qa_reports_metadata_file, "r") as metadata_file:
+                        loaded_metadata = yaml.load(metadata_file, Loader=yaml.SafeLoader)
+                        # check if loaded metadata is key=value and both are strings
+                        for key, value in loaded_metadata.items():
+                            if type(key) == str and type(value) == str:
+                                # only update metadata with simple keys
+                                # ignore all other items in the dictionary
+                                metadata.update({key: value})
+                            else:
+                                self.logger.warning("Ignoring key: %s" % key)
+                except FileNotFoundError:
+                    self.logger.warning("Metadata file not found")
+                except PermissionError:
+                    self.logger.warning("Insufficient permissions to open metadata file")
+        if submit_results(
+                group_project_slug="{}/{}".format(self.qa_reports_group, self.qa_reports_project),
+                build_version=self.qa_reports_build_version,
+                env_slug=self.qa_reports_env,
+                tests=tests,
+                metrics=metrics,
+                log=log,
+                metadata=metadata,
+                attachments=None):
+            self.logger.info("Results pushed to QA Reports")
+        else:
+            self.logger.warning("Results upload to QA Reports failed!")
 
     def dict_to_json(self):
         # Save test results to output/test_id/result.json
@@ -977,6 +998,29 @@ def get_args():
         default=None,
         help="qa reports build id for the result set",
     )
+    parser.add_argument(
+        "--qa-reports-disable-metadata",
+        dest="qa_reports_disable_metadata",
+        default=False,
+        action='store_true',
+        help="Disable sending metadata to SQUAD. Default: false",
+    )
+    parser.add_argument(
+        "--qa-reports-metadata",
+        dest="qa_reports_metadata",
+        default={},
+        action=StoreDictKeyPair,
+        nargs="+",
+        metavar="KEY=VALUE",
+        help="List of metadata key=value pairs to be sent to SQUAD",
+    )
+    parser.add_argument(
+        "--qa-reports-metadata-file",
+        dest="qa_reports_metadata_file",
+        default=None,
+        help="YAML file that defines metadata to be reported to SQUAD",
+    )
+
     args = parser.parse_args()
     return args
 
